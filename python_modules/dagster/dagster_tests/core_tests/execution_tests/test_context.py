@@ -405,3 +405,18 @@ def test_error_on_invalid_context_annotation():
         @asset
         def the_asset(context: int):
             pass
+
+
+def test_get_context():
+    ctx = OpExecutionContext.get_current()
+    assert ctx is None, ctx.job_name
+
+    @op
+    def o(context):
+        assert context == OpExecutionContext.get_current()
+
+    @job
+    def j():
+        o()
+
+    assert j.execute_in_process().success

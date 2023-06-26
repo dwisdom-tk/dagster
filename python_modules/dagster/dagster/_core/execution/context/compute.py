@@ -1,4 +1,6 @@
 from abc import ABC, ABCMeta, abstractmethod
+from contextlib import contextmanager
+from contextvars import ContextVar
 from inspect import _empty as EmptyAnnotation
 from typing import (
     AbstractSet,
@@ -308,7 +310,10 @@ class OpExecutionContext(AbstractComputeExecutionContext, metaclass=OpExecutionC
         """
         return self._step_execution_context.partition_key
 
-    @deprecated(breaking_version="2.0", additional_warn_text="Use `partition_key_range` instead.")
+    @deprecated(
+        breaking_version="2.0",
+        additional_warn_text="Use `partition_key_range` instead.",
+    )
     @public
     @property
     def asset_partition_key_range(self) -> PartitionKeyRange:
@@ -1300,15 +1305,24 @@ class OpExecutionContext(AbstractComputeExecutionContext, metaclass=OpExecutionC
     def set_requires_typed_event_stream(self, *, error_message: Optional[str] = None) -> None:
         self._step_execution_context.set_requires_typed_event_stream(error_message=error_message)
 
+    @staticmethod
+    def get_current() -> Optional["OpExecutionContext"]:
+        return _current_op_execution_context.get()
+
 
 class AssetExecutionContext(OpExecutionContext):
     def __init__(self, step_execution_context: StepExecutionContext):
         super().__init__(step_execution_context=step_execution_context)
 
+    @staticmethod
+    def get_current() -> Optional["AssetExecutionContext"]:
+        return _current_asset_execution_context.get()
 
-def build_execution_context(
+
+@contextmanager
+def enter_execution_context(
     step_context: StepExecutionContext,
-) -> Union[OpExecutionContext, AssetExecutionContext]:
+) -> Iterator[Union[OpExecutionContext, AssetExecutionContext]]:
     """Get the correct context based on the type of step (op or asset) and the user provided context
     type annotation. Follows these rules.
 
@@ -1359,16 +1373,37 @@ def build_execution_context(
             " OpExecutionContext, or left blank."
         )
 
-    if context_annotation is EmptyAnnotation:
-        # if no type hint has been given, default to:
-        # * AssetExecutionContext for sda steps not in graph-backed assets, and asset_checks
-        # * OpExecutionContext for non sda steps
-        # * OpExecutionContext for ops in graph-backed assets
-        if is_asset_check:
-            return AssetExecutionContext(step_context)
-        if is_op_in_graph_asset or not is_sda_step:
-            return OpExecutionContext(step_context)
-        return AssetExecutionContext(step_context)
-    if context_annotation is AssetExecutionContext:
-        return AssetExecutionContext(step_context)
-    return OpExecutionContext(step_context)
+    asset_ctx = AssetExecutionContext(step_context)
+    op_ctx = OpExecutionContext(step_context)
+
+    asset_token = _current_asset_execution_context.set(asset_ctx)
+    op_token = _current_op_execution_context.set(op_ctx)
+
+    try:
+        if context_annotation is EmptyAnnotation:
+            # if no type hint has been given, default to:
+            # * AssetExecutionContext for sda steps not in graph-backed assets, and asset_checks
+            # * OpExecutionContext for non sda steps
+            # * OpExecutionContext for ops in graph-backed assets
+            if is_asset_check:
+                yield asset_ctx
+            elif is_op_in_graph_asset or not is_sda_step:
+                yield op_ctx
+            else:
+                yield asset_ctx
+        elif context_annotation is AssetExecutionContext:
+            yield asset_ctx
+        else:
+            yield op_ctx
+    finally:
+        _current_asset_execution_context.reset(asset_token)
+        _current_op_execution_context.reset(op_token)
+
+
+_current_op_execution_context: ContextVar[Optional[OpExecutionContext]] = ContextVar(
+    "_current_op_execution_context", default=None
+)
+
+_current_asset_execution_context: ContextVar[Optional[AssetExecutionContext]] = ContextVar(
+    "_current_asset_execution_context", default=None
+)
