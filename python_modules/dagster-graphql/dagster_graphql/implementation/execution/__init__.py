@@ -102,6 +102,7 @@ def terminate_pipeline_execution(
     )
 
     if not record:
+        assert_permission(graphene_info, Permissions.TERMINATE_PIPELINE_EXECUTION)
         return GrapheneRunNotFoundError(run_id)
 
     run = record.dagster_run
